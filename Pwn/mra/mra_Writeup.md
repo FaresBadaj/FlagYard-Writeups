@@ -139,13 +139,16 @@ Two files, one purpose: `dest = buf + 0x110` so it doesn't collide with the chai
 One of them is bound to be right. And the fourth one *was*:
 
 ```
-[*] Trying file /app/flag (path 4/6)
-[✓] openat(/app/flag) + read + write: flag leaked!
+▶ openat(/app/flag) + read + write  (path 4/6)
+▶ [█████████████████░░░]  85.0%  flag leaked via openat/read/write chain
+✓ FLAG = FlagY{1ca96f4d43ee1b44a4586dbcaa11974f}
 
 ╔══════════════════════════════════════════════════════════╗
-║  ★ FLAG CAPTURED!   file=/app/flag                        ║
-║        FlagY{1ca96f4d43ee1b44a4586dbcaa11974f}            ║
+║                   ★  FLAG RECOVERED  ★                    ║
+║      FlagY{1ca96f4d43ee1b44a4586dbcaa11974f}              ║
+║                    elapsed 12.3 s                         ║
 ╚══════════════════════════════════════════════════════════╝
+[+] saved to ...\flag_from_mra.txt
 ```
 
 ---
@@ -181,11 +184,15 @@ Full colored version lives in the same folder as this writeup:
 mra_solve.py
 ```
 
-Run it, paste `host:port`, and it walks the whole chain with a live progress bar:
+Run it and paste `host:port` (or pass it as a CLI argument), and it walks
+the whole chain with a single moving progress line:
 
 ```bash
 python3 mra_solve.py
-Target (host:port) > tcp.flagyard.com:21290
+Enter the MRA challenge target (host:port): tcp.flagyard.com:21290
 ```
+
+On success it prints the flag panel and saves the flag to
+`flag_from_mra.txt` next to the script.
 
 *My arm is overflowing with bugs, can u prove that?* — proven. 🏁

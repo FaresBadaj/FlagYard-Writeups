@@ -1,0 +1,24 @@
+<html>
+    <head>
+        <title>
+            HR System
+        </title>
+        <link rel="stylesheet" href="{{url_for('static', filename='main.css')}}">
+    </head>
+    <body>
+        <div class="center">
+            <h2>Human Resource System</h2>
+            {% with messages = get_flashed_messages(with_categories=True) %}
+                {% if messages %}
+                    <div class="alert">
+                        {% for category, message in messages %}
+                            <p class="{{ category }}">{{ message }}</p>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+            {% block content %}
+            {% endblock %}
+        </div>
+    </body>
+</html>

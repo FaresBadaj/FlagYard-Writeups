@@ -215,11 +215,15 @@ Colored, self-contained version in the same folder:
 phone_book_solve.py
 ```
 
-Run it and paste `host:port`:
+Run it and paste `host:port` (or pass it as a CLI argument), with a single
+moving progress line while the 8 steps run:
 
 ```bash
 python3 phone_book_solve.py
-Target (host:port) > tcp.flagyard.com:29072
+Enter the Phone Book challenge target (host:port): tcp.flagyard.com:29072
 ```
+
+On success it prints the flag panel and saves the flag to
+`flag_from_phone_book.txt` next to the script.
 
 *The force of memory* — used wisely. 🏁

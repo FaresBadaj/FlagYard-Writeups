@@ -1,0 +1,12 @@
+{% extends 'layout.html' %}
+{% block content %}
+    Hi {{user}},
+    {% if secret %}
+        here is your secret: {{secret}}.
+    {% else%}
+        you're a normal user.
+    {% endif %}
+    <br>
+    <a href="{{ url_for('logout')}}">Logout</a>
+
+{% endblock %}
