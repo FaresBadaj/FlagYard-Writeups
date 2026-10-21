@@ -1,2 +1,7 @@
 ﻿__pycache__/
 *.pyc
+
+# macOS resource forks / finder junk
+.DS_Store
+__MACOSX/
+._*
